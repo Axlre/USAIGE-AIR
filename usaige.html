@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LD2450 · Radar</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#060c06;color:#00ff46;font-family:'Share Tech Mono','Courier New',monospace;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:20px;gap:16px}
+header{font-size:11px;letter-spacing:.4em;color:rgba(0,255,70,.45);text-transform:uppercase}
+.layout{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;justify-content:center}
+canvas{display:block;border:1px solid rgba(0,255,70,.15)}
+.panel{width:200px;display:flex;flex-direction:column;gap:10px}
+.box{background:rgba(0,255,70,.04);border:1px solid rgba(0,255,70,.15);padding:12px}
+.box label{display:block;font-size:9px;letter-spacing:.25em;color:rgba(0,255,70,.4);margin-bottom:6px}
+.box input{width:100%;background:rgba(0,255,70,.07);border:1px solid rgba(0,255,70,.25);color:#00ff46;font-family:inherit;font-size:12px;padding:5px 8px;outline:none;margin-bottom:8px}
+.box input:focus{border-color:rgba(0,255,70,.6)}
+.btn{width:100%;background:transparent;border:1px solid rgba(0,255,70,.4);color:#00ff46;font-family:inherit;font-size:10px;letter-spacing:.2em;padding:7px;cursor:pointer;text-transform:uppercase;transition:background .15s}
+.btn:hover{background:rgba(0,255,70,.1)}
+.status{margin-top:8px;font-size:10px;display:flex;align-items:center;gap:6px;letter-spacing:.1em}
+.dot{width:6px;height:6px;border-radius:50%;background:#333;flex-shrink:0}
+.dot.on{background:#00ff46;box-shadow:0 0 6px #00ff46}
+.dot.err{background:#ff3366;box-shadow:0 0 6px #ff3366}
+.tcard{border:1px solid rgba(0,255,70,.12);padding:10px 12px;transition:opacity .3s}
+.tcard.off{opacity:.2}
+.tcard .tlabel{font-size:9px;letter-spacing:.2em;color:rgba(0,255,70,.4);margin-bottom:6px}
+.tcard .tval{font-size:12px;line-height:1.9}
+.tcard .tval .u{color:rgba(0,255,70,.4);font-size:10px}
+.tcard.t2 .tlabel{color:rgba(0,212,255,.5)}
+.tcard.t2 .tval{color:#00d4ff}
+.tcard.t3 .tlabel{color:rgba(255,179,0,.5)}
+.tcard.t3 .tval{color:#ffb300}
+footer{font-size:9px;letter-spacing:.15em;color:rgba(0,255,70,.2);text-align:center}
+</style>
+</head>
+<body>
+
+<header>HLK-LD2450 · Sistema de Detección de Presencia</header>
+
+<div class="layout">
+  <canvas id="c" width="540" height="540"></canvas>
+
+  <div class="panel">
+    <div class="box">
+      <label>IP del ESP32</label>
+      <input id="ip" type="text" placeholder="192.168.137.50" value="">
+      <button class="btn" onclick="conectar()">Conectar</button>
+      <div class="status">
+        <div class="dot" id="dot"></div>
+        <span id="stxt">Desconectado</span>
+      </div>
+    </div>
+
+    <div class="tcard t1 off" id="tc0">
+      <div class="tlabel">OBJETIVO 1</div>
+      <div class="tval" id="tv0">—</div>
+    </div>
+    <div class="tcard t2 off" id="tc1">
+      <div class="tlabel">OBJETIVO 2</div>
+      <div class="tval" id="tv1">—</div>
+    </div>
+    <div class="tcard t3 off" id="tc2">
+      <div class="tlabel">OBJETIVO 3</div>
+      <div class="tval" id="tv2">—</div>
+    </div>
+  </div>
+</div>
+
+<footer>Rango máx 6m · Actualización 100ms · Sensor en origen ▲</footer>
+
+<script>
+const cv = document.getElementById('c');
+const cx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const OX = W / 2, OY = H - 16;
+const MAX_MM = 6000;
+const SC = (H - 30) / MAX_MM;
+
+const C = ['#00ff46','#00d4ff','#ffb300'];
+const CG = ['0,255,70','0,212,255','255,179,0'];
+
+// Ahora guardamos también speed y res
+const tgts = [
+  {id:0, active:false, x:null, y:null, speed:0, res:0, hist:[]},
+  {id:1, active:false, x:null, y:null, speed:0, res:0, hist:[]},
+  {id:2, active:false, x:null, y:null, speed:0, res:0, hist:[]}
+];
+let sweep = -Math.PI / 2;
+
+function mm2cv(x, y){ return { px: OX + x * SC, py: OY - y * SC }; }
+
+function bg(){
+  cx.fillStyle = '#060c06';
+  cx.fillRect(0,0,W,H);
+
+  [1000,2000,3000,4000,5000,6000].forEach(r => {
+    const pr = r * SC;
+    cx.beginPath();
+    cx.arc(OX, OY, pr, Math.PI, 0, false);
+    cx.strokeStyle = r % 2000 === 0 ? 'rgba(0,255,70,.14)' : 'rgba(0,255,70,.07)';
+    cx.lineWidth = 1; cx.stroke();
+    if(r <= MAX_MM){
+      cx.fillStyle = 'rgba(0,255,70,.25)'; cx.font = '9px monospace';
+      cx.fillText(r/1000 + 'm', OX + pr * Math.cos(-Math.PI*0.08) + 3, OY + pr * Math.sin(-Math.PI*0.08) - 3);
+    }
+  });
+
+  [-60,-30,0,30,60].forEach(deg => {
+    const a = (deg - 90) * Math.PI / 180;
+    cx.beginPath(); cx.moveTo(OX, OY);
+    cx.lineTo(OX + Math.cos(a)*(H), OY + Math.sin(a)*(H));
+    cx.strokeStyle = deg === 0 ? 'rgba(0,255,70,.2)' : 'rgba(0,255,70,.08)';
+    cx.lineWidth = 1; cx.stroke();
+    if(deg !== 0){
+      const lr = (H-60)*.78;
+      cx.fillStyle = 'rgba(0,255,70,.2)'; cx.font = '9px monospace';
+      cx.fillText((deg>0?'+':'')+deg+'°', OX + Math.cos(a)*lr - 8, OY + Math.sin(a)*lr + 3);
+    }
+  });
+
+  cx.beginPath(); cx.moveTo(0, OY); cx.lineTo(W, OY);
+  cx.strokeStyle = 'rgba(0,255,70,.1)'; cx.lineWidth = 1; cx.stroke();
+
+  cx.beginPath(); cx.arc(OX, OY, 5, 0, Math.PI*2);
+  cx.fillStyle='#ff3366'; cx.shadowBlur=14; cx.shadowColor='#ff3366'; cx.fill(); cx.shadowBlur=0;
+  cx.fillStyle='rgba(255,51,102,.2)'; cx.beginPath(); cx.arc(OX,OY,14,0,Math.PI*2); cx.fill();
+}
+
+function drawSweep(){
+  const span = Math.PI / 5; const steps = 24;
+  for(let i=0;i<steps;i++){
+    const f = i/steps;
+    const a0 = sweep - span*(1-f);
+    const a1 = sweep - span*(1-(f+1/steps));
+    cx.beginPath(); cx.moveTo(OX,OY); cx.arc(OX,OY,H+20,a0,a1); cx.closePath();
+    cx.fillStyle = `rgba(0,255,70,${f*f*0.18})`; cx.fill();
+  }
+  cx.beginPath(); cx.moveTo(OX,OY); cx.lineTo(OX+Math.cos(sweep)*H, OY+Math.sin(sweep)*H);
+  cx.strokeStyle='rgba(0,255,70,.9)'; cx.lineWidth=1.5;
+  cx.shadowBlur=10; cx.shadowColor='rgba(0,255,70,.5)'; cx.stroke(); cx.shadowBlur=0;
+}
+
+function drawTargets(){
+  tgts.forEach((t,i) => {
+    if(!t.active || t.x===null || t.y===null) return;
+    const {px,py} = mm2cv(t.x, t.y);
+    if(py<-20||py>H+20||px<-20||px>W+20) return;
+
+    t.hist.forEach((h,hi) => {
+      const a = (hi/t.hist.length)*0.35;
+      cx.beginPath(); cx.arc(h.px,h.py,2+hi*.15,0,Math.PI*2);
+      cx.fillStyle=`rgba(${CG[i]},${a})`; cx.fill();
+    });
+
+    cx.beginPath(); cx.arc(px,py,7,0,Math.PI*2);
+    cx.fillStyle=C[i]; cx.shadowBlur=22; cx.shadowColor=C[i]; cx.fill(); cx.shadowBlur=0;
+
+    cx.beginPath(); cx.arc(px,py,13,0,Math.PI*2);
+    cx.strokeStyle=`rgba(${CG[i]},.35)`; cx.lineWidth=1; cx.stroke();
+
+    const dist = Math.sqrt(t.x**2+t.y**2);
+    cx.fillStyle=C[i]; cx.font='11px monospace';
+    cx.fillText(`T${i+1} ${(dist/1000).toFixed(2)}m`, px+16, py-4);
+    cx.fillStyle=`rgba(${CG[i]},.45)`; cx.font='10px monospace';
+    cx.fillText(`${t.speed} cm/s`, px+16, py+10);
+  });
+}
+
+let last=0;
+function loop(ts){
+  const dt = Math.min((ts-last)/1000, .05);
+  last=ts;
+  sweep += dt * (Math.PI*2/3.5);
+  bg(); drawSweep(); drawTargets();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function updateCards(){
+  tgts.forEach((t,i) => {
+    const card = document.getElementById('tc'+i);
+    const info = document.getElementById('tv'+i);
+    card.classList.toggle('off',!t.active);
+    
+    if(t.active){
+      const d = Math.sqrt((t.x||0)**2+t.y**2)/1000;
+      // UI Expandida para mostrar toda la telemetría del MicroPython
+      info.innerHTML=
+        `X: ${t.x} <span class="u">mm</span><br>`+
+        `Y: ${t.y} <span class="u">mm</span><br>`+
+        `Dist: ${d.toFixed(2)} <span class="u">m</span><br>`+
+        `Vel: ${t.speed} <span class="u">cm/s</span><br>`+
+        `Res: ${t.res}`;
+    } else {
+      info.innerHTML='—';
+    }
+  });
+}
+
+let pollInterval = null;
+
+function conectar(){
+  const ip = document.getElementById('ip').value.trim();
+  if(!ip) return;
+  
+  if(pollInterval) clearInterval(pollInterval);
+  setStatus('Conectando...');
+
+  // Polling a 10Hz (100ms) consumiendo la API de MicroPython
+  pollInterval = setInterval(async () => {
+    try {
+      const res = await fetch(`http://${ip}/`);
+      if(!res.ok) throw new Error("Error HTTP");
+      
+      const data = await res.json();
+      setStatus('on');
+
+      // Marcar todos como inactivos primero
+      tgts.forEach(t => t.active = false);
+
+      // Actualizar los que vinieron en el JSON
+      data.forEach(d => {
+        if(d.id >= 0 && d.id <= 2){
+          const t = tgts[d.id];
+          t.active = true;
+          t.x = d.x; t.y = d.y; t.speed = d.speed; t.res = d.res;
+          
+          const p = mm2cv(t.x, t.y);
+          t.hist.push(p);
+          if(t.hist.length > 20) t.hist.shift();
+        }
+      });
+      
+      // Limpiar datos visuales de objetivos perdidos
+      tgts.forEach(t => { if(!t.active) { t.x = null; t.y = null; t.hist = []; } });
+      
+      updateCards();
+    } catch (e) {
+      setStatus('err');
+    }
+  }, 100);
+}
+
+function setStatus(s){
+  const dot=document.getElementById('dot'), txt=document.getElementById('stxt');
+  dot.className='dot'+(s==='on'?' on':s==='err'?' err':'');
+  txt.textContent = s==='on'?'Conectado':s==='err'?'Desconectado':'Buscando...';
+}
+</script>
+</body>
+</html>
